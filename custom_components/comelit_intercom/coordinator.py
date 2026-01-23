@@ -12,7 +12,21 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .comelit_client import IconaBridgeClient
-from .const import CONF_HOST, CONF_TOKEN, DOMAIN, UPDATE_INTERVAL
+from .const import (
+    CONF_CALL_TARGET,
+    CONF_DOOR_COUNT,
+    CONF_DOOR_DELAY,
+    CONF_HOST,
+    CONF_RESET_INTERVAL,
+    CONF_TOKEN,
+    DEFAULT_DOOR_COUNT,
+    DEFAULT_DOOR_DELAY,
+    DEFAULT_PORT,
+    DEFAULT_RESET_INTERVAL,
+    DOMAIN,
+    UPDATE_INTERVAL,
+)
+from .peer_door_opener import PeerDoorConfig, PeerDoorOpener
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +41,7 @@ class ComelitDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.token = entry.data[CONF_TOKEN]
         self.client = IconaBridgeClient(self.host)
         self.vip_config: dict[str, Any] = {}
+        self._peer_door_opener = PeerDoorOpener(hass)
 
         super().__init__(
             hass,
@@ -97,3 +112,78 @@ class ComelitDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         finally:
             # Always clean up the door client connection
             await door_client.shutdown()
+
+    def _door_toggle_config(self) -> PeerDoorConfig:
+        call_target = str(self.entry.options.get(CONF_CALL_TARGET, "")).strip()
+        door_count = int(self.entry.options.get(CONF_DOOR_COUNT, DEFAULT_DOOR_COUNT))
+        reset_interval = float(
+            self.entry.options.get(CONF_RESET_INTERVAL, DEFAULT_RESET_INTERVAL)
+        )
+        door_delay = float(self.entry.options.get(CONF_DOOR_DELAY, DEFAULT_DOOR_DELAY))
+
+        return PeerDoorConfig(
+            call_target=call_target,
+            door_count=min(max(1, door_count), 2),
+            cam2_reuse_window=max(0.0, reset_interval),
+            door_delay=max(0.0, door_delay),
+        )
+
+    def _door_item_for_index(self, door_index: int) -> dict[str, Any]:
+        doors = self.data.get("doors", [])
+        if not isinstance(doors, list) or not doors:
+            raise RuntimeError("No doors found in device configuration")
+        if len(doors) == 1:
+            first = doors[0]
+            if not isinstance(first, dict):
+                raise RuntimeError("Invalid door entry in configuration")
+            return first
+
+        for door in doors:
+            if not isinstance(door, dict):
+                continue
+            try:
+                if int(door.get("output-index")) == int(door_index):
+                    return door
+            except Exception:
+                continue
+        first = doors[0]
+        if not isinstance(first, dict):
+            raise RuntimeError("Invalid door entry in configuration")
+        return first
+
+    async def async_open_door_index(self, door_index: int) -> None:
+        """Open a door by index.
+
+        Multi-door mode uses a peer-aware strategy:
+        - Door open targets the currently active peer/stream.
+        - Door 2 is reached by a short call + restart sequence to select the cam2 peer.
+        - Door 1 after Door 2 may need to wait for fallback to avoid switching back.
+        """
+        idx = int(door_index)
+        cfg = self._door_toggle_config()
+        _LOGGER.info(
+            "Door open requested: door_index=%s door_count=%s call_target=%s",
+            idx,
+            int(cfg.door_count),
+            cfg.call_target,
+        )
+
+        if idx < 1 or idx > int(cfg.door_count):
+            raise ValueError("door_index must be in 1..door_count")
+
+        if not cfg.call_target:
+            raise RuntimeError(
+                "Multi-door is enabled but no entrance unit address is configured"
+            )
+
+        # Peer-aware door opening is handled by a dedicated opener which
+        # implements the proven call-restart + door-open-only sequences.
+        await self._peer_door_opener.async_open_door_index(
+            host=self.host,
+            port=int(DEFAULT_PORT),
+            token=self.token,
+            config=cfg,
+            door_index=int(idx),
+            output_index=1,
+        )
+        return

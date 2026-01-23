@@ -12,7 +12,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_DOOR_COUNT, DEFAULT_DOOR_COUNT, DOMAIN
 from .coordinator import ComelitDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,13 +26,24 @@ async def async_setup_entry(
     """Set up Comelit button entities."""
     coordinator: ComelitDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Create button entities for each door
-    entities = []
-    doors = coordinator.data.get("doors", [])
+    door_count = min(
+        int(entry.options.get(CONF_DOOR_COUNT, DEFAULT_DOOR_COUNT)),
+        2,
+    )
 
-    for door in doors:
-        entities.append(ComelitDoorButton(coordinator, door))
+    entities: list[ButtonEntity] = []
 
+    # Backward compatible: door_count=1 uses address-book doors as before.
+    if door_count <= 1:
+        doors = coordinator.data.get("doors", [])
+        for door in doors:
+            entities.append(ComelitDoorButton(coordinator, door))
+        async_add_entities(entities)
+        return
+
+    # Multi-door: create Door 1..N buttons which use the door index action.
+    for idx in range(1, door_count + 1):
+        entities.append(ComelitDoorIndexButton(coordinator, idx))
     async_add_entities(entities)
 
 
@@ -74,3 +85,37 @@ class ComelitDoorButton(CoordinatorEntity[ComelitDataUpdateCoordinator], ButtonE
         return self.coordinator.last_update_success and self._door.get("name") in [
             d.get("name") for d in self.coordinator.data.get("doors", [])
         ]
+
+
+class ComelitDoorIndexButton(
+    CoordinatorEntity[ComelitDataUpdateCoordinator], ButtonEntity
+):
+    """Representation of a Comelit door button using a door index."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:door-open"
+
+    def __init__(
+        self, coordinator: ComelitDataUpdateCoordinator, door_index: int
+    ) -> None:
+        """Initialize the button."""
+        super().__init__(coordinator)
+        self._door_index = int(door_index)
+        self._attr_name = f"Door {self._door_index}"
+        self._attr_unique_id = f"{coordinator.entry.unique_id}_door_{self._door_index}"
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, coordinator.entry.unique_id)},
+            name=f"Comelit Intercom ({coordinator.host})",
+            manufacturer="Comelit",
+            model="ICONA Bridge",
+        )
+
+    async def async_press(self) -> None:
+        """Handle the button press."""
+        await self.coordinator.async_open_door_index(self._door_index)
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self.coordinator.last_update_success

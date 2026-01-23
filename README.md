@@ -8,6 +8,7 @@ This is a native Home Assistant integration for Comelit intercom systems (using 
 - **Automatic token extraction** - no manual token retrieval required (if using default password)
 - Automatic discovery of all available doors
 - Creates button entities for each door
+- Optional multi-door mode (`Door 1..N` buttons) for installations where door opening depends on the active peer/stream (experimental)
 - Simple configuration through Home Assistant UI
 - Works with Comelit intercom models that support the ICONA Bridge protocol
 
@@ -40,6 +41,28 @@ After you've installed the component on your system, it's time to set it up:
 2. Click "Add Integration" and search for "Comelit Intercom"
 3. Enter your device's IP address
 4. Leave the token field empty for automatic extraction, or provide your token if you know it
+5. (Optional) Configure multi-door behavior if your entrance unit can open different doors depending on the active view/peer
+
+### Multi-door mode (experimental)
+
+Some installations can open different doors depending on which peer/stream is currently active (often visible in the mobile app by swiping between views).
+
+The protocol does not expose a reliable selector or status for which peer/door is currently active, so the integration uses an observed and proven strategy:
+- Door open targets the currently active peer/stream (`cam1` vs `cam2`).
+- To reliably select `cam2`, the integration starts a call, waits for video, then restarts the call (`RELEASE + START40`) and waits for video again.
+- The `cam2` peer association persists only briefly (~20s on the tested setup) and then falls back to `cam1`.
+
+When you configure `Number of doors > 1`, the integration will expose `Door 1..N` button entities. Currently, peer-aware door opening supports **2 doors** (`Door 1` = cam1 peer, `Door 2` = cam2 peer).
+
+If you open `Door 1` shortly after opening `Door 2`, the integration will wait for the automatic fallback instead of switching back (to avoid unnecessary toggles).
+
+Multi-door settings:
+- `Entrance unit address (call_target)` (example: `SB100001`)
+- `Number of doors` (`door_count`, default `1`; currently max `2`)
+- `Door 2 reuse window` (`reset_interval`, default `15s`): reuse cached cam2 peer for repeated `Door 2` requests (safety margin)
+- `Door delay` (`door_delay`, default `0s`): optional delay between selecting the cam2 peer and sending door-open
+
+Warning: multi-door mode can physically open a door and is not guaranteed to be failsafe. Test carefully in your environment.
 
 ### Automatic Token Extraction
 
@@ -173,6 +196,7 @@ This integration was made possible thanks to:
 - Some Comelit devices may have encrypted backups, preventing automatic token extraction
 - Connection issues on macOS with Python 3.13 (being investigated)
 - Very old firmware versions may use a different protocol
+- Multi-door mode is installation-specific and may open the wrong door if the peer timing differs significantly from your setup (tune `reset_interval` / `door_delay` if needed)
 
 ## Developer Information
 
