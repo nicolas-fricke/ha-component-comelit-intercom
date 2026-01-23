@@ -34,36 +34,38 @@ async def async_setup_test_service(hass: HomeAssistant):
 
         _LOGGER.info(f"Testing connection to {ip}")
 
-        client = IconaBridgeClient(ip, token)
+        client = IconaBridgeClient(ip)
         try:
             await client.connect()
             _LOGGER.info("Connected successfully!")
 
-            if await client.authenticate():
-                _LOGGER.info("Authenticated successfully!")
-                doors = await client.list_doors()
-                _LOGGER.info(f"Found {len(doors)} doors: {doors}")
-
-                hass.states.async_set(
-                    f"{DOMAIN}.test_result",
-                    "success",
-                    {"doors": doors, "message": f"Found {len(doors)} doors"},
-                )
-            else:
-                _LOGGER.error("Authentication failed")
+            auth_code = await client.authenticate(token)
+            if auth_code != 200:
+                _LOGGER.error("Authentication failed with code %s", auth_code)
                 hass.states.async_set(
                     f"{DOMAIN}.test_result",
                     "auth_failed",
-                    {"message": "Authentication failed"},
+                    {"message": f"Authentication failed with code {auth_code}"},
                 )
+                return
 
-            await client.shutdown()
+            _LOGGER.info("Authenticated successfully!")
+            doors = await client.list_doors()
+            _LOGGER.info("Found %s doors", len(doors))
+
+            hass.states.async_set(
+                f"{DOMAIN}.test_result",
+                "success",
+                {"doors": doors, "message": f"Found {len(doors)} doors"},
+            )
 
         except Exception as e:
             _LOGGER.error(f"Connection failed: {e}")
             hass.states.async_set(
                 f"{DOMAIN}.test_result", "connection_failed", {"message": str(e)}
             )
+        finally:
+            await client.shutdown()
 
     hass.services.async_register(
         DOMAIN, "test_connection", handle_test_connection, schema=None

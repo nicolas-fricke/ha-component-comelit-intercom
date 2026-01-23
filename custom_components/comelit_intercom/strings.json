@@ -11,16 +11,53 @@
         "data_description": {
           "token": "Leave empty to automatically extract using default password"
         }
+      },
+      "doors": {
+        "title": "Door Settings",
+        "description": "Configure how many doors/peers your entrance unit provides. In some installations, opening a door depends on the currently active peer/stream (cam1 vs cam2).",
+        "data": {
+          "call_target": "Entrance unit address (e.g., SB100001)",
+          "door_count": "Number of doors",
+          "reset_interval": "Door 2 reuse window (seconds)",
+          "door_delay": "Door delay (seconds)"
+        },
+        "data_description": {
+          "reset_interval": "Reuse cached cam2 peer for repeated Door 2 requests (safety margin; default 15s)",
+          "door_delay": "Optional delay between selecting the cam2 peer and sending door-open"
+        }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect to the device",
       "invalid_auth": "Invalid authentication token",
       "auto_token_failed": "Failed to extract token automatically. Please check that the device is accessible and using the default 'comelit' password, or enter your token manually.",
+      "invalid_call_target": "Invalid entrance unit address",
       "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "Device is already configured"
+      "already_configured": "Device is already configured",
+      "unknown": "Unexpected error"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Comelit Intercom Options",
+        "description": "Adjust peer-based multi-door behavior.",
+        "data": {
+          "call_target": "Entrance unit address (e.g., SB100001)",
+          "door_count": "Number of doors",
+          "reset_interval": "Door 2 reuse window (seconds)",
+          "door_delay": "Door delay (seconds)"
+        },
+        "data_description": {
+          "reset_interval": "Reuse cached cam2 peer for repeated Door 2 requests (safety margin; default 15s)",
+          "door_delay": "Optional delay between selecting the cam2 peer and sending door-open"
+        }
+      }
+    },
+    "error": {
+      "invalid_call_target": "Invalid entrance unit address"
     }
   }
 }

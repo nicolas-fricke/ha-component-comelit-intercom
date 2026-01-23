@@ -12,9 +12,19 @@ from homeassistant.const import CONF_HOST, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import selector
 
 from .comelit_client import IconaBridgeClient
-from .const import DOMAIN
+from .const import (
+    CONF_CALL_TARGET,
+    CONF_DOOR_COUNT,
+    CONF_DOOR_DELAY,
+    CONF_RESET_INTERVAL,
+    DEFAULT_DOOR_COUNT,
+    DEFAULT_DOOR_DELAY,
+    DEFAULT_RESET_INTERVAL,
+    DOMAIN,
+)
 from .token_extractor import extract_token
 
 _LOGGER = logging.getLogger(__name__)
@@ -108,6 +118,24 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         if not config:
             raise CannotConnect("Failed to get configuration")
 
+        # Suggest a default call target from the first known door address, if present.
+        vip = config.get("vip", {}) if isinstance(config, dict) else {}
+        user_params = vip.get("user-parameters", {}) if isinstance(vip, dict) else {}
+        doors = (
+            user_params.get("opendoor-address-book", [])
+            if isinstance(user_params, dict)
+            else []
+        )
+        default_call_target = None
+        if isinstance(doors, list):
+            for door in doors:
+                if not isinstance(door, dict):
+                    continue
+                addr = door.get("apt-address")
+                if isinstance(addr, str) and addr.strip():
+                    default_call_target = addr.strip()
+                    break
+
         _LOGGER.info("Configuration retrieved successfully")
         await client.shutdown()
 
@@ -115,6 +143,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         return {
             "title": f"Comelit Intercom ({data[CONF_HOST]})",
             "token": data.get(CONF_TOKEN),  # Include token in case it was extracted
+            "default_call_target": default_call_target,
         }
 
     except TimeoutError as err:
@@ -138,6 +167,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Comelit."""
 
     VERSION = 1
+
+    def __init__(self) -> None:
+        """Initialize flow."""
+        self._validated_data: dict[str, Any] | None = None
+        self._title: str | None = None
+        self._default_call_target: str | None = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -176,7 +211,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(validated_data[CONF_HOST])
             self._abort_if_unique_id_configured()
 
-            return self.async_create_entry(title=info["title"], data=validated_data)
+            self._validated_data = validated_data
+            self._title = str(info["title"])
+            self._default_call_target = info.get("default_call_target")
+            return await self.async_step_doors()
 
         return self.async_show_form(
             step_id="user",
@@ -184,5 +222,193 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "token_help": "Leave token empty to try automatic extraction"
+            },
+        )
+
+    async def async_step_doors(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure multi-door behavior."""
+        if self._validated_data is None or self._title is None:
+            return self.async_abort(reason="unknown")
+
+        errors: dict[str, str] = {}
+
+        default_call_target = (self._default_call_target or "").strip()
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_CALL_TARGET, default=default_call_target): str,
+                vol.Required(
+                    CONF_DOOR_COUNT, default=DEFAULT_DOOR_COUNT
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=1, max=2, step=1, mode=selector.NumberSelectorMode.BOX
+                    )
+                ),
+                vol.Required(
+                    CONF_RESET_INTERVAL, default=DEFAULT_RESET_INTERVAL
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=600.0)),
+                vol.Required(CONF_DOOR_DELAY, default=DEFAULT_DOOR_DELAY): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=10.0)
+                ),
+            }
+        )
+
+        if user_input is None:
+            return self.async_show_form(step_id="doors", data_schema=schema)
+
+        call_target = str(user_input.get(CONF_CALL_TARGET, "")).strip()
+        if not call_target:
+            errors["base"] = "invalid_call_target"
+
+        if errors:
+            try:
+                door_count_default = int(user_input.get(CONF_DOOR_COUNT))
+            except Exception:
+                door_count_default = DEFAULT_DOOR_COUNT
+            door_count_default = min(max(1, door_count_default), 2)
+            # Keep the user's input in the form defaults.
+            schema = vol.Schema(
+                {
+                    vol.Required(CONF_CALL_TARGET, default=call_target): str,
+                    vol.Required(
+                        CONF_DOOR_COUNT, default=door_count_default
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=2, step=1, mode=selector.NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Required(
+                        CONF_RESET_INTERVAL, default=user_input.get(CONF_RESET_INTERVAL)
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=600.0)),
+                    vol.Required(
+                        CONF_DOOR_DELAY, default=user_input.get(CONF_DOOR_DELAY)
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=10.0)),
+                }
+            )
+            return self.async_show_form(
+                step_id="doors",
+                data_schema=schema,
+                errors=errors,
+            )
+
+        options = {
+            CONF_CALL_TARGET: call_target,
+            CONF_DOOR_COUNT: int(user_input[CONF_DOOR_COUNT]),
+            CONF_RESET_INTERVAL: float(user_input[CONF_RESET_INTERVAL]),
+            CONF_DOOR_DELAY: float(user_input[CONF_DOOR_DELAY]),
+        }
+        return self.async_create_entry(
+            title=self._title,
+            data=self._validated_data,
+            options=options,
+        )
+
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow handler."""
+        return OptionsFlowHandler(config_entry)
+
+
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options for Comelit Intercom."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage the options."""
+        try:
+            existing_door_count = int(
+                self._config_entry.options.get(CONF_DOOR_COUNT, DEFAULT_DOOR_COUNT)
+            )
+        except Exception:
+            existing_door_count = DEFAULT_DOOR_COUNT
+        existing_door_count = min(max(1, existing_door_count), 2)
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="init",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(
+                            CONF_CALL_TARGET,
+                            default=self._config_entry.options.get(
+                                CONF_CALL_TARGET, ""
+                            ),
+                        ): str,
+                        vol.Required(
+                            CONF_DOOR_COUNT,
+                            default=existing_door_count,
+                        ): selector.NumberSelector(
+                            selector.NumberSelectorConfig(
+                                min=1,
+                                max=2,
+                                step=1,
+                                mode=selector.NumberSelectorMode.BOX,
+                            )
+                        ),
+                        vol.Required(
+                            CONF_RESET_INTERVAL,
+                            default=self._config_entry.options.get(
+                                CONF_RESET_INTERVAL, DEFAULT_RESET_INTERVAL
+                            ),
+                        ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=600.0)),
+                        vol.Required(
+                            CONF_DOOR_DELAY,
+                            default=self._config_entry.options.get(
+                                CONF_DOOR_DELAY, DEFAULT_DOOR_DELAY
+                            ),
+                        ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=10.0)),
+                    }
+                ),
+            )
+
+        call_target = str(user_input.get(CONF_CALL_TARGET, "")).strip()
+        if not call_target:
+            try:
+                default_door_count = int(user_input.get(CONF_DOOR_COUNT))
+            except Exception:
+                default_door_count = existing_door_count
+            default_door_count = min(max(1, default_door_count), 2)
+            return self.async_show_form(
+                step_id="init",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_CALL_TARGET, default=call_target): str,
+                        vol.Required(
+                            CONF_DOOR_COUNT, default=default_door_count
+                        ): selector.NumberSelector(
+                            selector.NumberSelectorConfig(
+                                min=1,
+                                max=2,
+                                step=1,
+                                mode=selector.NumberSelectorMode.BOX,
+                            )
+                        ),
+                        vol.Required(
+                            CONF_RESET_INTERVAL,
+                            default=user_input.get(CONF_RESET_INTERVAL),
+                        ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=600.0)),
+                        vol.Required(
+                            CONF_DOOR_DELAY, default=user_input.get(CONF_DOOR_DELAY)
+                        ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=10.0)),
+                    }
+                ),
+                errors={"base": "invalid_call_target"},
+            )
+
+        return self.async_create_entry(
+            title="",
+            data={
+                CONF_CALL_TARGET: call_target,
+                CONF_DOOR_COUNT: int(user_input[CONF_DOOR_COUNT]),
+                CONF_RESET_INTERVAL: float(user_input[CONF_RESET_INTERVAL]),
+                CONF_DOOR_DELAY: float(user_input[CONF_DOOR_DELAY]),
             },
         )
