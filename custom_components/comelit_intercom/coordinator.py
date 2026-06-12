@@ -56,8 +56,11 @@ class ComelitDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             doors = self.vip_config.get("user-parameters", {}).get(
                 "opendoor-address-book", []
             )
+            actuators = self.vip_config.get("user-parameters", {}).get(
+                "actuator-address-book", []
+            )
 
-            return {"doors": doors, "vip": self.vip_config}
+            return {"doors": doors, "actuators": actuators, "vip": self.vip_config}
 
         except ConfigEntryAuthFailed:
             # Re-raise auth errors
@@ -97,3 +100,32 @@ class ComelitDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         finally:
             # Always clean up the door client connection
             await door_client.shutdown()
+    
+    async def async_open_actuator(self, actuator_name: str) -> None:
+        """Open a specific actuator."""
+        # Create a separate client instance for actuator operations
+        # to avoid interfering with the coordinator's update cycle
+        icona_client = IconaBridgeClient(self.host)
+        try:
+            await icona_client.connect()
+
+            # Authenticate
+            auth_code = await icona_client.authenticate(self.token)
+            if auth_code != 200:
+                raise Exception(f"Authentication failed with code {auth_code}")
+
+            # Find the actuator
+            actuators = self.data.get("actuators", [])
+            actuator = next((a for a in actuators if a.get("name") == actuator_name), None)
+            if not actuator:
+                raise Exception(f"Actuator '{actuator_name}' not found")
+
+            # Open the actuator
+            await icona_client.open_actuator(self.vip_config, actuator)
+
+        except Exception as err:
+            _LOGGER.error("Error opening actuator %s: %s", actuator_name, err)
+            raise
+        finally:
+            # Always clean up the actuator client connection
+            await icona_client.shutdown()

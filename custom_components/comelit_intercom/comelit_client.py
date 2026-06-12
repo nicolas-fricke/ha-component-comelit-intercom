@@ -402,6 +402,17 @@ class IconaBridgeClient:
             )
         return []
 
+    async def list_actuators(self) -> list[dict]:
+        """List all available actuators"""
+        config = await self.get_config("all")
+        if config and "vip" in config:
+            return (
+                config["vip"]
+                .get("user-parameters", {})
+                .get("actuator-address-book", [])
+            )
+        return []
+
     def _string_to_buffer(self, s: str, null_terminated: bool = False) -> bytes:
         """Convert string to bytes buffer"""
         b = s.encode("ascii")
@@ -536,6 +547,51 @@ class IconaBridgeClient:
         self.logger.info(f"Door '{door_item.get('name', 'Unknown')}' open command sent")
 
 
+    def _get_open_actuator_message(self, vip: dict, item: dict, channel_id: int, confirm: bool = False) -> bytes:
+        """Create open actuator message"""
+        buffers = [
+            bytes([0x20 if confirm else 0x00, 0x18, 0x45, 0xBE]),
+            bytes([0x8F, 0x5C, 0x00, 0x04]),
+            bytes([0xFF, 0xFF, 0xFF, 0xFF]),
+            self._string_to_buffer(f"{vip['apt-address']}{item['output-index']}", True),
+            self._string_to_buffer(item["apt-address"], True),
+            NULL,
+        ]
+        return self._create_binary_packet_from_buffers(channel_id, *buffers)
+
+    def _get_init_open_actuator_message(self, vip: dict, item: dict, channel_id: int) -> bytes:
+        """Create init open actuator message"""
+        buffers = [
+            bytes([0xC0, 0x18, 0x45, 0xBE]),
+            bytes([0x8F, 0x5C, 0x00, 0x04]),
+            bytes([0x00, 0x20, 0xFF, 0x01]),
+            bytes([0xFF, 0xFF, 0xFF, 0xFF]),
+            self._string_to_buffer(f"{vip['apt-address']}{item['output-index']}", True),
+            self._string_to_buffer(item["apt-address"], True),
+            NULL,
+        ]
+        return self._create_binary_packet_from_buffers(channel_id, *buffers)
+
+    async def open_actuator(self, vip: dict, item: dict):
+        """Open a specific actuator"""
+        if Channel.CTPP not in self.open_channels:
+            await self._open_door_init(vip)
+
+        channel = self.open_channels[Channel.CTPP]
+
+        message1 = self._get_init_open_actuator_message(vip, item, channel.id)
+        await self._write_packet(message1)
+        resp = await self._read_response()
+        self.logger.debug(f"{resp}")
+        resp2 = await self._read_response()
+        self.logger.debug(f"{resp2}")
+
+        packet_message1 = self._get_open_actuator_message(vip, item, False, channel.id)
+        await self._write_packet(packet_message1)
+        confirm_message1 = self._get_open_actuator_message(vip, item, True, channel.id)
+        await self._write_packet(confirm_message1)
+
+
 # High-level convenience functions
 async def list_doors(host: str, token: str) -> list[dict[str, Any]]:
     """List all available doors from a Comelit device"""
@@ -545,6 +601,20 @@ async def list_doors(host: str, token: str) -> list[dict[str, Any]]:
         auth_code = await client.authenticate(token)
         if auth_code == 200:
             return await client.list_doors()
+        else:
+            raise Exception(f"Authentication failed with code {auth_code}")
+    finally:
+        await client.shutdown()
+
+# High-level convenience functions
+async def list_actuators(host: str, token: str) -> list[dict[str, Any]]:
+    """List all available actuators from a Comelit device"""
+    client = IconaBridgeClient(host)
+    try:
+        await client.connect()
+        auth_code = await client.authenticate(token)
+        if auth_code == 200:
+            return await client.list_actuators()
         else:
             raise Exception(f"Authentication failed with code {auth_code}")
     finally:
@@ -578,6 +648,38 @@ async def open_door(host: str, token: str, door_name: str) -> bool:
 
         # Open the door
         await client.open_door(vip, door)
+        return True
+
+    finally:
+        await client.shutdown()
+
+async def open_actuator(host: str, token: str, actuator_name: str) -> bool:
+    """Open a specific actuator by name"""
+    client = IconaBridgeClient(host)
+    try:
+        await client.connect()
+        auth_code = await client.authenticate(token)
+        if auth_code != 200:
+            raise Exception(f"Authentication failed with code {auth_code}")
+
+        # Get configuration
+        config = await client.get_config("all")
+        if not config or "vip" not in config:
+            raise Exception("Failed to get configuration")
+
+        vip = config["vip"]
+        actuators = vip.get("user-parameters", {}).get("actuator-address-book", [])
+
+        # Find the actuator by name
+        actuator = next((a for a in actuators if a.get("name") == actuator_name), None)
+        if not actuator:
+            available = [a.get("name", "Unknown") for a in actuators]
+            raise Exception(
+                f"Actuator '{actuator_name}' not found. Available: {', '.join(available)}"
+            )
+
+        # Open the actuator
+        await client.open_actuator(vip, actuator)
         return True
 
     finally:

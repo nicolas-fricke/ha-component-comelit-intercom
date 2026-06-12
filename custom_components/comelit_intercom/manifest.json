@@ -8,5 +8,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/nicolas-fricke/ha-component-comelit-intercom/issues",
   "requirements": ["aiohttp>=3.8.0"],
-  "version": "1.0.2"
-}
+  "version": "1.0.3"
+} 
