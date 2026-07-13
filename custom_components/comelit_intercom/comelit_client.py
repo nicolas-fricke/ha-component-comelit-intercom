@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import random
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -71,6 +72,7 @@ class IconaBridgeClient:
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.open_channels: dict[str, ChannelData] = {}
+        self._tap_token: int | None = None
         # Start with a semi-random request ID to avoid conflicts
         # The device tracks requests by ID, so we need unique values
         self.request_id = 8000 + int(asyncio.get_event_loop().time() * 10) % 1000
@@ -85,6 +87,7 @@ class IconaBridgeClient:
                 asyncio.open_connection(self.host, self.port), timeout=10.0
             )
             self.logger.info("Connected")
+            self.open_channels.clear()
 
         except TimeoutError as e:
             self.logger.error(f"Connection timeout to {self.host}:{self.port}")
@@ -139,6 +142,7 @@ class IconaBridgeClient:
             self.writer.close()
             await self.writer.wait_closed()
             self.logger.info("Connection closed")
+        self.open_channels.clear()
 
     def _create_header(self, body_length: int, request_id: int = 0) -> bytes:
         """Create 8-byte message header
@@ -221,7 +225,7 @@ class IconaBridgeClient:
 
     async def _write_packet(self, packet: bytes):
         """Write a packet to the socket"""
-        self.logger.debug(f"Writing {len(packet)} bytes: {packet.hex(' ')}")
+        self.logger.debug("Writing %s bytes", len(packet))
         self.writer.write(packet)
         await self.writer.drain()
 
@@ -326,11 +330,25 @@ class IconaBridgeClient:
         )
         await self._write_packet(packet)
 
-        response = await self._read_response()
+        try:
+            response = await self._read_response()
+        except Exception as err:  # pragma: no cover - defensive cleanup
+            self.logger.debug(
+                "Failed to read close response for %s channel: %s",
+                channel_data.channel,
+                err,
+            )
+            response = None
+
+        self.open_channels.pop(channel_data.channel, None)
+
         if response and response["type"] == "binary":
-            del self.open_channels[channel_data.channel]
             self.logger.debug(f"Closed channel {channel_data.channel}")
             return True
+        self.logger.debug(
+            "Channel %s closed locally without explicit acknowledgment",
+            channel_data.channel,
+        )
         return False
 
     async def authenticate(self, token: str) -> int:
@@ -409,6 +427,163 @@ class IconaBridgeClient:
             b += NULL
         return b
 
+    def _addr10(self, addr: str) -> bytes:
+        """Encode a VIP address as the 10-byte padded form used by TAP frames."""
+        raw = str(addr).encode("ascii", errors="strict")
+        if len(raw) > 10:
+            raise ValueError(f"VIP address too long: {addr!r}")
+        return raw.ljust(10, b"\x00")[:10]
+
+    def _next_tap_token(self) -> bytes:
+        """Return a monotonically increasing 4-byte token for TAP frames."""
+        if self._tap_token is None:
+            self._tap_token = random.getrandbits(32) & 0xFFFFFFFF
+        else:
+            self._tap_token = (self._tap_token + 1) & 0xFFFFFFFF
+        return struct.pack("<I", self._tap_token)
+
+    def _create_tap_packet(
+        self,
+        channel_id: int,
+        opcode: int,
+        token: bytes,
+        payload: bytes,
+        dst: str,
+        src: str,
+    ) -> bytes:
+        """Create a TAP-framed CTPP packet."""
+        if len(token) != 4:
+            raise ValueError("TAP token must be 4 bytes")
+        payload_len = len(payload)
+        pad = (4 - (payload_len % 4)) % 4
+
+        body = bytearray()
+        body += struct.pack("<H", int(opcode) & 0xFFFF)
+        body += token
+        body += (payload_len & 0x7FF).to_bytes(2, "big")
+        body += payload
+        if pad:
+            body += b"\x00" * pad
+        body += b"\xff\xff\xff\xff"
+        body += self._addr10(dst)
+        body += self._addr10(src)
+
+        return self._create_binary_packet_from_buffers(channel_id, bytes(body))
+
+    async def _open_door_peer_tap(self, vip: dict, door_item: dict) -> None:
+        """Open a peer-bound door using the TAP sequence required by 1456S."""
+        vip_base = str(vip["apt-address"])
+        apt_full = f"{vip_base}{vip.get('apt-subaddress', '')}"
+        door_addr = str(door_item["apt-address"])
+        output_index = int(door_item["output-index"])
+        dst_addr = f"{vip_base}{output_index}"
+        door_name = door_item.get("name", "Unknown")
+
+        self.logger.info(
+            "Starting peer/TAP door sequence door=%s apt_full=%s door_addr=%s output_index=%s",
+            door_name,
+            apt_full,
+            door_addr,
+            output_index,
+        )
+
+        opened_channels: list[ChannelData] = []
+        try:
+            ctpp = await self._open_channel(Channel.CTPP, apt_full)
+            opened_channels.append(ctpp)
+
+            for channel_name in (Channel.CSPB, Channel.INFO):
+                try:
+                    opened_channels.append(await self._open_channel(channel_name))
+                except Exception as err:
+                    self.logger.debug(
+                        "Optional channel %s could not be opened for peer/TAP sequence: %s",
+                        channel_name,
+                        err,
+                    )
+
+            reg_cid = random.getrandbits(16) & 0xFFFF
+            reg_payload = (
+                b"\x00\x40"
+                + struct.pack("<H", reg_cid)
+                + self._addr10(apt_full)
+                + struct.pack("<H", 0x0E10)
+                + b"\x00"
+            )
+            await self._write_packet(
+                self._create_tap_packet(
+                    ctpp.id,
+                    MessageType.OPEN_DOOR_INIT,
+                    self._next_tap_token(),
+                    reg_payload,
+                    apt_full,
+                    vip_base,
+                )
+            )
+            await asyncio.sleep(0.20)
+
+            op_payload = b"\x00\x2d" + self._addr10(door_addr) + bytes([output_index])
+            token_door = self._next_tap_token()
+            token_init = self._next_tap_token()
+            packets = [
+                self._create_tap_packet(
+                    ctpp.id,
+                    MessageType.OPEN_DOOR,
+                    token_door,
+                    b"",
+                    dst_addr,
+                    door_addr,
+                ),
+                self._create_tap_packet(
+                    ctpp.id,
+                    MessageType.OPEN_DOOR_CONFIRM,
+                    token_door,
+                    b"",
+                    dst_addr,
+                    door_addr,
+                ),
+                self._create_tap_packet(
+                    ctpp.id,
+                    MessageType.OPEN_DOOR_INIT,
+                    token_init,
+                    op_payload,
+                    dst_addr,
+                    door_addr,
+                ),
+                self._create_tap_packet(
+                    ctpp.id,
+                    MessageType.OPEN_DOOR,
+                    token_door,
+                    b"",
+                    dst_addr,
+                    door_addr,
+                ),
+                self._create_tap_packet(
+                    ctpp.id,
+                    MessageType.OPEN_DOOR_CONFIRM,
+                    token_door,
+                    b"",
+                    dst_addr,
+                    door_addr,
+                ),
+            ]
+            for packet in packets:
+                await self._write_packet(packet)
+
+            self.logger.info("Peer/TAP door '%s' open command sent", door_name)
+            await asyncio.sleep(1.0)
+        finally:
+            for channel in reversed(opened_channels):
+                try:
+                    if channel.channel in self.open_channels:
+                        await self._close_channel(channel)
+                except Exception as err:
+                    self.logger.debug(
+                        "Failed to close peer/TAP channel %s cleanly: %s",
+                        channel.channel,
+                        err,
+                    )
+
     async def _open_door_init(self, vip: dict):
         """Initialize door opening sequence
 
@@ -460,6 +635,27 @@ class IconaBridgeClient:
 
         This redundancy ensures reliability across different firmware versions.
         """
+        user_parameters = vip.get("user-parameters", {})
+        actions = user_parameters.get("opendoor-actions", [])
+        output_index = door_item.get("output-index")
+        peer_action = any(
+            action.get("action") == "peer"
+            and action.get("output-index") == output_index
+            for action in actions
+            if isinstance(action, dict)
+        )
+
+        if peer_action:
+            try:
+                await self._open_door_peer_tap(vip, door_item)
+                return
+            except Exception as err:
+                self.logger.warning(
+                    "Peer/TAP door sequence failed for door=%s; falling back to legacy sequence: %s",
+                    door_item.get("name", "Unknown"),
+                    err,
+                )
+
         # Initialize control channel if needed
         if Channel.CTPP not in self.open_channels:
             await self._open_door_init(vip)
