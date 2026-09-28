@@ -1,0 +1,71 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Comelit Intercom",
+        "data": {
+          "host": "IP Address",
+          "port": "Port",
+          "token": "Token (optional)"
+        },
+        "description": "Enter the IP address of your Comelit intercom device. Token is optional - if not provided, it will be extracted automatically using the default 'comelit' password.",
+        "data_description": {
+          "token": "Leave empty to automatically extract using default password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect to Comelit Intercom",
+        "description": "Enter a replacement token, or leave it empty to try automatic extraction.",
+        "data": {
+          "token": "Token (optional)"
+        }
+      },
+      "reconfigure": {
+        "title": "Update Comelit network settings",
+        "description": "Enter the current IP address and protocol port for this device.",
+        "data": {
+          "host": "IP Address",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the device",
+      "invalid_auth": "Invalid authentication token",
+      "auto_token_failed": "Failed to extract token automatically. Please check that the device is accessible and using the default 'comelit' password, or enter your token manually.",
+      "wrong_device": "The address belongs to a different Comelit device",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "reauth_successful": "Authentication updated successfully",
+      "reconfigure_successful": "Network settings updated successfully"
+    }
+  },
+  "exceptions": {
+    "video_media_not_received": {
+      "message": "The intercom accepted the call but did not send video. Try again and check the Comelit device is not in use by another client."
+    },
+    "video_call_failed": {
+      "message": "The intercom video session could not be started."
+    },
+    "video_rtpc_not_received": {
+      "message": "The intercom did not open its media channel."
+    },
+    "door_open_failed": {
+      "message": "The {door} control could not be activated."
+    }
+  },
+  "entity": {
+    "switch": {
+      "automatic_still_previews": {
+        "name": "Automatic still previews"
+      }
+    },
+    "number": {
+      "still_preview_interval": {
+        "name": "Still preview interval"
+      }
+    }
+  }
+}

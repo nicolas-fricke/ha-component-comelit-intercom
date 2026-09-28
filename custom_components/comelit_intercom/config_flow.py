@@ -1,27 +1,35 @@
-"""Config flow for Comelit integration."""
+"""Config flow for the Comelit integration."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST, CONF_TOKEN
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 
 from .comelit_client import IconaBridgeClient
-from .const import DOMAIN
+from .const import CONF_DEVICE_ID, DEFAULT_PORT, DOMAIN
 from .token_extractor import extract_token
+from .video.config import device_config_from_vip
+
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigFlowResult
+else:
+    ConfigFlowResult = FlowResult
 
 _LOGGER = logging.getLogger(__name__)
 
+PORT_SELECTOR = vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
+        vol.Optional(CONF_PORT, default=DEFAULT_PORT): PORT_SELECTOR,
         vol.Optional(CONF_TOKEN): str,
     }
 )
@@ -35,154 +43,189 @@ class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
 
 
+def _device_id(config: dict[str, Any]) -> str:
+    """Build an address-based identity that survives DHCP changes."""
+    vip = config.get("vip")
+    if not isinstance(vip, dict):
+        raise CannotConnect("Device configuration has no VIP apartment address")
+    device_config = device_config_from_vip(vip)
+    if not device_config.apt_address:
+        raise CannotConnect("Device configuration has no VIP apartment address")
+    return f"{device_config.apt_address}:{device_config.apt_subaddress}"
+
+
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect."""
-    _LOGGER.info("Starting validation for Comelit device at %s", data[CONF_HOST])
-
-    # If no token provided, try to extract it automatically
+    """Validate credentials and return normalized device information."""
+    del hass
+    host = data[CONF_HOST].strip()
+    port = data.get(CONF_PORT, DEFAULT_PORT)
     token = data.get(CONF_TOKEN)
+
     if not token:
-        _LOGGER.info("No token provided, attempting automatic extraction")
-
         try:
-            token = await asyncio.wait_for(extract_token(data[CONF_HOST]), timeout=30.0)
+            token = await asyncio.wait_for(extract_token(host), timeout=30.0)
         except TimeoutError:
-            _LOGGER.error("Token extraction timed out after 30 seconds")
+            _LOGGER.error("Token extraction timed out for %s", host)
             token = None
-        except Exception as e:
-            _LOGGER.error(f"Token extraction failed with error: {e}")
+        except Exception:
+            _LOGGER.warning("Token extraction failed for %s", host, exc_info=True)
             token = None
-
         if not token:
-            raise InvalidAuth(
-                "Failed to extract token automatically. Please check that the device is accessible and using the default 'comelit' password, or enter your token manually."
-            )
+            raise InvalidAuth("automatic_token_extraction_failed")
 
-        _LOGGER.info("Successfully extracted token automatically")
-        # Update data with extracted token
-        data = dict(data)
-        data[CONF_TOKEN] = token
-
-    client = IconaBridgeClient(data[CONF_HOST])
-
+    client = IconaBridgeClient(host, port)
     try:
-        # Add timeout to prevent hanging
-        _LOGGER.info("Attempting to connect to Comelit device at %s", data[CONF_HOST])
-        await asyncio.wait_for(client.connect(), timeout=10.0)
-        _LOGGER.info("Successfully connected to device")
-    except TimeoutError as e:
-        _LOGGER.error("Connection timeout to device at %s", data[CONF_HOST])
-        raise CannotConnect("Connection timeout - device not responding") from e
-    except OSError as err:
-        # Special handling for macOS "No route to host" error
-        if err.errno == 65:  # EHOSTUNREACH on macOS
-            _LOGGER.error(
-                "Cannot reach device at %s:%s - possible firewall or wrong port",
-                data[CONF_HOST],
-                64100,
-            )
-            raise CannotConnect(
-                "Cannot reach device - check firewall settings"
-            ) from err
-        _LOGGER.error("Network error connecting to device: %s", err)
-        raise CannotConnect(f"Network error: {err}") from err
-    except Exception as err:
-        _LOGGER.error("Cannot connect to device: %s", err)
-        raise CannotConnect from err
+        try:
+            await asyncio.wait_for(client.connect(), timeout=10.0)
+        except TimeoutError as err:
+            raise CannotConnect("Connection timed out") from err
+        except (ConnectionError, OSError) as err:
+            raise CannotConnect(str(err)) from err
 
-    try:
-        _LOGGER.info("Authenticating with device")
-        auth_code = await asyncio.wait_for(
-            client.authenticate(data[CONF_TOKEN]), timeout=15.0
-        )
-
+        auth_code = await asyncio.wait_for(client.authenticate(token), timeout=15.0)
         if auth_code != 200:
-            _LOGGER.error("Authentication failed with code %s", auth_code)
             raise InvalidAuth(f"Authentication failed with code {auth_code}")
 
-        _LOGGER.info("Authentication successful, getting configuration")
-
-        # Get configuration to verify everything works
         config = await asyncio.wait_for(client.get_config("all"), timeout=15.0)
-
-        if not config:
-            raise CannotConnect("Failed to get configuration")
-
-        _LOGGER.info("Configuration retrieved successfully")
-        await client.shutdown()
-
-        # Return info that you want to store in the config entry
+        if not isinstance(config, dict) or not config:
+            raise CannotConnect("Device returned no configuration")
         return {
-            "title": f"Comelit Intercom ({data[CONF_HOST]})",
-            "token": data.get(CONF_TOKEN),  # Include token in case it was extracted
+            "title": f"Comelit Intercom ({host})",
+            CONF_HOST: host,
+            CONF_PORT: port,
+            CONF_TOKEN: token,
+            CONF_DEVICE_ID: _device_id(config),
         }
-
     except TimeoutError as err:
-        _LOGGER.error("Operation timeout while communicating with device: %s", err)
-        _LOGGER.error("This could be during connect, auth, or config retrieval")
-        await client.shutdown()
-        raise CannotConnect("Device communication timeout") from err
-    except InvalidAuth:
-        await client.shutdown()
-        raise
-    except CannotConnect:
-        await client.shutdown()
+        raise CannotConnect("Device communication timed out") from err
+    except (CannotConnect, InvalidAuth):
         raise
     except Exception as err:
-        _LOGGER.exception("Unexpected error during validation: %s", err)
+        _LOGGER.exception("Unexpected error validating %s", host)
+        raise CannotConnect(str(err)) from err
+    finally:
         await client.shutdown()
-        raise CannotConnect(f"Unexpected error: {err}") from err
+
+
+def _error_key(err: Exception) -> str:
+    """Translate validation exceptions to config-flow error keys."""
+    if isinstance(err, InvalidAuth):
+        if str(err) == "automatic_token_extraction_failed":
+            return "auto_token_failed"
+        return "invalid_auth"
+    if isinstance(err, CannotConnect):
+        return "cannot_connect"
+    return "unknown"
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Comelit."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle the initial step."""
-        if user_input is None:
-            return self.async_show_form(
-                step_id="user",
-                data_schema=STEP_USER_DATA_SCHEMA,
-                description_placeholders={
-                    "token_help": "Leave token empty to try automatic extraction"
-                },
-            )
-
-        errors = {}
-        validated_data = None
-
-        try:
-            info = await validate_input(self.hass, user_input)
-            # Get the potentially updated data (with extracted token)
-            validated_data = user_input.copy()
-            if not user_input.get(CONF_TOKEN) and info.get("token"):
-                validated_data[CONF_TOKEN] = info["token"]
-        except CannotConnect:
-            errors["base"] = "cannot_connect"
-        except InvalidAuth as e:
-            errors["base"] = "invalid_auth"
-            # If auto-extraction failed, show more helpful error
-            if "extract token automatically" in str(e):
-                errors["base"] = "auto_token_failed"
-        except Exception:  # pylint: disable=broad-except
-            _LOGGER.exception("Unexpected exception")
-            errors["base"] = "unknown"
-        else:
-            # Check if already configured
-            await self.async_set_unique_id(validated_data[CONF_HOST])
-            self._abort_if_unique_id_configured()
-
-            return self.async_create_entry(title=info["title"], data=validated_data)
+    ) -> ConfigFlowResult:
+        """Connect a new Comelit device."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                info = await validate_input(self.hass, user_input)
+            except Exception as err:  # noqa: BLE001 - mapped to flow errors
+                errors["base"] = _error_key(err)
+                if errors["base"] == "unknown":
+                    _LOGGER.exception("Unexpected config-flow exception")
+            else:
+                await self.async_set_unique_id(info[CONF_DEVICE_ID])
+                self._abort_if_unique_id_configured()
+                if any(
+                    entry.data.get(CONF_DEVICE_ID) == info[CONF_DEVICE_ID]
+                    for entry in self._async_current_entries()
+                ):
+                    return self.async_abort(reason="already_configured")
+                return self.async_create_entry(
+                    title=info.pop("title"),
+                    data=info,
+                )
 
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
-            description_placeholders={
-                "token_help": "Leave token empty to try automatic extraction"
-            },
+        )
+
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+        """Start reauthentication after a rejected token."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Validate and replace an expired token."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            candidate = dict(entry.data)
+            candidate[CONF_TOKEN] = user_input.get(CONF_TOKEN, "")
+            try:
+                info = await validate_input(self.hass, candidate)
+            except Exception as err:  # noqa: BLE001 - mapped to flow errors
+                errors["base"] = _error_key(err)
+            else:
+                known_id = entry.data.get(CONF_DEVICE_ID)
+                if known_id and info[CONF_DEVICE_ID] != known_id:
+                    errors["base"] = "wrong_device"
+                else:
+                    title = info.pop("title")
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        title=title,
+                        data_updates=info,
+                        reason="reauth_successful",
+                    )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Optional(CONF_TOKEN): str}),
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Update the network location while preserving device identity."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str,
+                vol.Required(
+                    CONF_PORT,
+                    default=entry.data.get(CONF_PORT, DEFAULT_PORT),
+                ): PORT_SELECTOR,
+            }
+        )
+        if user_input is not None:
+            candidate = {**entry.data, **user_input}
+            try:
+                info = await validate_input(self.hass, candidate)
+            except Exception as err:  # noqa: BLE001 - mapped to flow errors
+                errors["base"] = _error_key(err)
+            else:
+                known_id = entry.data.get(CONF_DEVICE_ID)
+                if known_id and info[CONF_DEVICE_ID] != known_id:
+                    errors["base"] = "wrong_device"
+                else:
+                    title = info.pop("title")
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        title=title,
+                        data_updates=info,
+                        reason="reconfigure_successful",
+                    )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=schema,
+            errors=errors,
         )
