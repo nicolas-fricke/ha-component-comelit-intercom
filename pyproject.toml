@@ -1,14 +1,20 @@
 [tool.black]
 line-length = 88
-target-version = ['py311']
+# Keep formatter output parseable by mypy until it supports Python 3.14's
+# parenthesis-free multi-exception syntax. Runtime/lint/type targets stay 3.14.
+target-version = ['py313']
 include = '\.pyi?$'
 
 [tool.isort]
 profile = "black"
 multi_line_output = 3
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
 [tool.ruff]
-target-version = "py311"
+target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
@@ -26,7 +32,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 check_untyped_defs = true
 disallow_untyped_calls = true
 disallow_untyped_defs = true
