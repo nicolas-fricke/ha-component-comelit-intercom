@@ -3,7 +3,7 @@
 [![CI](https://github.com/Jordi-14/ha-component-comelit-intercom/actions/workflows/ci.yaml/badge.svg)](https://github.com/Jordi-14/ha-component-comelit-intercom/actions/workflows/ci.yaml)
 [![HACS Validation](https://github.com/Jordi-14/ha-component-comelit-intercom/actions/workflows/hacs.yaml/badge.svg)](https://github.com/Jordi-14/ha-component-comelit-intercom/actions/workflows/hacs.yaml)
 [![GitHub Release](https://img.shields.io/github/v/release/Jordi-14/ha-component-comelit-intercom)](https://github.com/Jordi-14/ha-component-comelit-intercom/releases)
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
+[![Marketplace Custom](https://img.shields.io/badge/Marketplace-Custom-41BDF5.svg)](https://www.home-assistant.io/integrations/marketplace/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.5%2B-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
 
 This is a native Home Assistant integration for Comelit intercom systems using
@@ -35,16 +35,24 @@ Docker containers.
 
 ## Installation
 
-### HACS Installation (recommended)
+### Marketplace / HACS installation (recommended)
 
-1. Ensure you have [HACS](https://hacs.xyz/) installed and set up
-2. Add this repository's URL, `https://github.com/Jordi-14/ha-component-comelit-intercom`, as custom repository and select "Integration" (see [docs](https://hacs.xyz/docs/faq/custom_repositories/))
-3. Search for "Comelit Intercom" and click on "Download"
-4. After this is complete, restart Home Assistant
+Home Assistant 2026.11 and later include the **Marketplace** under **Settings > Marketplace**. It replaces HACS and carries over existing installations automatically. On older supported Home Assistant versions, continue using HACS. See the [Marketplace documentation](https://www.home-assistant.io/integrations/marketplace/).
 
-HACS installs stable releases by default. To test a prerelease, enable beta
-updates for this repository and select the desired version. See
-[Beta Testing](docs/beta_testing.md) before installing a beta.
+On HA 2026.11+:
+
+1. Open **Settings > Marketplace > Add from link**.
+2. Enter `https://github.com/Jordi-14/ha-component-comelit-intercom` and select
+   **Add**. Connect GitHub if requested.
+3. Open **Comelit Intercom** and select **Install**.
+4. Restart Home Assistant.
+
+On older supported HA versions, add the same URL under **HACS > Integrations >
+Custom repositories**, select **Integration**, then download **Comelit Intercom**
+and restart Home Assistant.
+
+Stable releases are offered by default. See [Beta Testing](docs/beta_testing.md)
+before installing a prerelease.
 
 ### Manual Installation
 

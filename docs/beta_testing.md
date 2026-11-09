@@ -7,16 +7,18 @@ behavior before a stable release.
 
 Every prerelease includes a HACS-compatible `comelit_intercom.zip` asset.
 
-### Through HACS
+### Through the Marketplace / HACS
 
-1. Open the Comelit Intercom repository in HACS.
-2. Enable prerelease or beta updates from the repository menu.
-3. Redownload the repository and select the desired beta version.
-4. Restart Home Assistant.
-5. Confirm the loaded version before testing the intercom.
+On HA 2026.11+, open **Settings > Devices & services > Marketplace** and find
+the Comelit repository. Enable its disabled **Pre-release** switch entity,
+then turn the switch on. Open Comelit in **Settings > Marketplace** and use
+**Install another version** to choose the intended beta.
 
-The exact menu labels can vary between HACS versions. Disable prerelease updates
-again if the installation should return to the stable channel after testing.
+On older HA versions, open the repository in HACS, enable beta updates and
+redownload the desired version. Restart Home Assistant and confirm the loaded
+version before testing. Turn prerelease updates off after testing to receive
+stable updates. Use a full backup for rollback. See the
+[Marketplace documentation](https://www.home-assistant.io/integrations/marketplace/).
 
 ### Manually
 
@@ -67,6 +69,6 @@ tokens, local IP addresses, backups, databases, or packet captures publicly.
 
 ## Roll back
 
-Restore the full Home Assistant backup created before testing, or reinstall the
-previous integration version in HACS and restart Home Assistant. A full backup
-is preferred because it also preserves config-entry state.
+Restore the full Home Assistant backup created before testing. This restores
+both the integration files and config-entry state. On older HACS installations,
+reinstalling a previous version alone does not reverse config-entry migrations.
