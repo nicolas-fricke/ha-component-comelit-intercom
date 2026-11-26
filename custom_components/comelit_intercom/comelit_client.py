@@ -11,6 +11,7 @@ from typing import Any
 # Protocol Constants
 ICONA_BRIDGE_PORT = 64100  # TCP port for ICONA Bridge protocol
 HEADER_MAGIC = b"\x00\x06"  # All messages start with these magic bytes
+READ_TIMEOUT = 10.0  # Seconds to wait for a response before giving up
 HEADER_SIZE = 8  # Fixed header size: magic(2) + length(2) + request_id(2) + padding(2)
 NULL = b"\x00"
 
@@ -79,6 +80,11 @@ class IconaBridgeClient:
         """Connect to the ICONA Bridge"""
         self.logger.info(f"Connecting to {self.host}:{self.port}")
 
+        # Channels belong to a single TCP session. Drop any state left over
+        # from a previous (possibly aborted) session, otherwise _open_channel
+        # would return stale channel data and every later request fails.
+        self.open_channels.clear()
+
         try:
             # Try asyncio connection with timeout
             self.reader, self.writer = await asyncio.wait_for(
@@ -134,10 +140,17 @@ class IconaBridgeClient:
             return False
 
     async def shutdown(self):
-        """Close the connection"""
-        if self.writer:
-            self.writer.close()
-            await self.writer.wait_closed()
+        """Close the connection and reset session state"""
+        writer = self.writer
+        self.reader = None
+        self.writer = None
+        self.open_channels.clear()
+        if writer:
+            try:
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
+            except Exception as err:  # connection may already be broken
+                self.logger.debug(f"Error while closing connection: {err}")
             self.logger.info("Connection closed")
 
     def _create_header(self, body_length: int, request_id: int = 0) -> bytes:
@@ -233,13 +246,17 @@ class IconaBridgeClient:
         - request_id > 0: JSON or binary data responses
         """
         # Read the 8-byte header first
-        header = await self.reader.readexactly(HEADER_SIZE)
+        header = await asyncio.wait_for(
+            self.reader.readexactly(HEADER_SIZE), timeout=READ_TIMEOUT
+        )
         body_length = struct.unpack("<H", header[2:4])[0]
         request_id = struct.unpack("<H", header[4:6])[0]
 
         # Read body if present
         if body_length > 0:
-            body = await self.reader.readexactly(body_length)
+            body = await asyncio.wait_for(
+                self.reader.readexactly(body_length), timeout=READ_TIMEOUT
+            )
             self.logger.debug(f"Read {len(body)} bytes: {body.hex(' ')}")
 
             # Parse response based on request_id

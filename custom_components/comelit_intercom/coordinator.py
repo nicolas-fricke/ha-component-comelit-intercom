@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -12,7 +13,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .comelit_client import IconaBridgeClient
-from .const import CONF_HOST, CONF_TOKEN, DOMAIN, UPDATE_INTERVAL
+from .const import CONF_HOST, CONF_TOKEN, DOMAIN, UPDATE_INTERVAL, UPDATE_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,18 +38,21 @@ class ComelitDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Comelit."""
+        # Use a fresh client per update so no state from a failed run survives
+        self.client = IconaBridgeClient(self.host)
         try:
-            await self.client.connect()
+            async with asyncio.timeout(UPDATE_TIMEOUT):
+                await self.client.connect()
 
-            # Authenticate
-            auth_code = await self.client.authenticate(self.token)
-            if auth_code != 200:
-                raise ConfigEntryAuthFailed(
-                    f"Authentication failed with code {auth_code}"
-                )
+                # Authenticate
+                auth_code = await self.client.authenticate(self.token)
+                if auth_code != 200:
+                    raise ConfigEntryAuthFailed(
+                        f"Authentication failed with code {auth_code}"
+                    )
 
-            # Get configuration
-            config = await self.client.get_config("all")
+                # Get configuration
+                config = await self.client.get_config("all")
             if not config or "vip" not in config:
                 raise UpdateFailed("Failed to get configuration from device")
 
