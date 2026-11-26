@@ -12,3 +12,6 @@ DEFAULT_PORT = 64100
 
 # Update interval (in seconds)
 UPDATE_INTERVAL = 300  # 5 minutes
+
+# Maximum time a single update may take (in seconds)
+UPDATE_TIMEOUT = 60
